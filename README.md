@@ -15,12 +15,13 @@ GB-2411FF HDMI monitörü için Türkçe, hafif bir macOS menü çubuğu uygulam
 open build/NetEkran.app
 ```
 
-Betik uygulamayı derler, ad-hoc imzalar ve dört test programını çalıştırır. Harici paket indirmez. Üretilen uygulama notarize edilmemiştir.
+Betik uygulamayı derler, ad-hoc imzalar ve beş test programını çalıştırır. Harici paket indirmez. Üretilen uygulama notarize edilmemiştir.
 
 ## Kullanım
 
 Menü çubuğundaki ekran simgesinden:
 
+- **Parlaklık kaydırıcısı:** monitörün DDC/CI üzerinden bildirdiği gerçek değeri gösterir; sürükleyince yalnız fiziksel monitör parlaklığını değiştirir ve geri okuyarak doğrular. Monitörde DDC/CI açık olmalıdır. Yanıt yoksa kaydırıcı devre dışı kalır; gamma ile yazılımsal karartma yapılmaz.
 - **Net görüntüyü uygula:** hedef profili uygular ve gerçek çıkışı yeniden okur. 20 saniye içinde **Bu ayarları koru** seçilmezse önceki profile döner.
 - **Ayarları otomatik koru:** doğrulanmış profil için kullanıcı tarafından etkinleştirilir. Bağlantı/uyanma bildirimleri ve sınırlı aralıklı kontroller kullanır; doğru ayara yeniden yazmaz.
 - **Oturum açılışında başlat:** macOS giriş öğesi olarak kullanıcı isteğiyle etkinleşir.
@@ -31,15 +32,17 @@ Menü çubuğundaki ekran simgesinden:
 
 ## Uygulama ve geri alma
 
-CoreGraphics/SkyLight sistem yolu gerçek görüntü çıkışını yapılandırır. IOAV yalnız EDID ve video çıkışını okumak için kullanılır; doğrudan bağlantı yazıcısı yoktur. Özel API sembolleri ve desteklenen sürüm çalışma anında kontrol edilir. SIP veya Gatekeeper kapatılmaz.
+CoreGraphics/SkyLight sistem yolu gerçek görüntü çıkışını yapılandırır. IOAV, EDID/video çıkışı okuması ve DDC/CI parlaklık iletişimi için kullanılır; doğrudan video bağlantısı yazıcısı yoktur. Özel API sembolleri ve desteklenen sürüm çalışma anında kontrol edilir. SIP veya Gatekeeper kapatılmaz.
 
-Sistem RGB geçişinde fabrika ICC dosyasını yeniden üretebildiği için özgün dosyanın **bayt bayt aynı kopyası** yerelde saklanır ve ColorSync ile seçilir. ICC seçimi gerçek RGB yapılandırmasının yerine kullanılmaz. ICC içeriği, gamma tablosu, dithering, parlaklık ve font ayarı karşılaştırılır; uygulama bu değerler için yeni içerik üretmez. Sistem tarafından değiştirilen ICC oluşturulma tarihi içerik karşılaştırmasında ayrılır; ham veriler yerel işlem kayıtlarında korunur.
+Sistem RGB geçişinde fabrika ICC dosyasını yeniden üretebildiği için özgün dosyanın **bayt bayt aynı kopyası** yerelde saklanır ve ColorSync ile seçilir. ICC seçimi gerçek RGB yapılandırmasının yerine kullanılmaz. ICC içeriği, gamma tablosu, dithering, parlaklık ve font ayarı karşılaştırılır; otomatik profil uygulaması bu değerleri değiştirmez. Parlaklık kaydırıcısıyla yapılan açık kullanıcı isteği monitörün VCP `0x10` parlaklık değerini değiştirir; ICC ve gamma içeriğine dokunmaz. Sistem tarafından değiştirilen ICC oluşturulma tarihi içerik karşılaştırmasında ayrılır; ham veriler yerel işlem kayıtlarında korunur.
 
 Bağımsız gözetmen arayüz çöktüğünde de geri dönüşü yürütür. Çekirdekte takılan bir ekran sürücüsünün kurtarılması garanti edilemez; böyle durumda başarı yerine `recoveryRequired` bildirilir ve çakışan yazımlar engellenir.
 
 ## Test kapsamı
 
-`./build.sh`; hedef profil reddi, ICC koruması, bağımsız gözetmen zaman aşımı/çökme senaryoları ve geçici dosyalarla override ekle/kaldır testlerini çalıştırır. Bu otomatik testler ekran ayarını değiştirmez.
+Parlaklık işlemleri arayüzü bekletmeyen, süre sınırı olan ayrı bir süreçte yürütülür. Sürükleme istekleri birleştirilir ve ekran profili işlemleriyle ortak kilit kullanılır. DDC/CI paket biçimi için [ddcutil birincil uygulama örneği](https://github.com/rockowitz/ddcutil/issues/585) incelenmiştir; çalışma zamanı bağımlılığı eklenmemiştir.
+
+`./build.sh`; DDC paketleri/parlaklık aralıkları/alt süreç zaman aşımı, hedef profil reddi, ICC koruması, bağımsız gözetmen zaman aşımı/çökme senaryoları ve geçici dosyalarla override ekle/kaldır testlerini çalıştırır. Bu otomatik testler ekran ayarını değiştirmez.
 
 Desteklenen yapılandırmada gerçek profil uygulaması, 20 saniyelik geri alma, arayüz çökmesi, HDMI yeniden bağlantısı, uyku/uyanma ve hedef kaydın yeniden oluşturulması da donanım üzerinde kontrol edilmiştir. Bu sonuçlar farklı donanımlar veya temiz macOS kurulumu için uyumluluk garantisi değildir. Kendi ekranınızda görsel netliği ve renkleri ayrıca kontrol edin.
 

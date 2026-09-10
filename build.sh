@@ -12,8 +12,8 @@ cat > build/NetEkran.app/Contents/Info.plist <<'PLIST'
 <key>CFBundleDisplayName</key><string>NetEkran</string>
 <key>CFBundleExecutable</key><string>NetEkran</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
@@ -30,3 +30,6 @@ build/watchdog-process-tests
 
 swiftc -module-cache-path /tmp/netekran-swift-cache Sources/Profile.swift Sources/Probe.swift Sources/LinkProbe.swift Sources/Output.swift Sources/Runtime.swift Sources/ICC.swift Sources/Override.swift Tests/OverrideFilesystemTests.swift -o build/override-filesystem-tests
 build/override-filesystem-tests
+
+swiftc -module-cache-path /tmp/netekran-swift-cache Sources/Profile.swift Sources/Probe.swift Sources/LinkProbe.swift Sources/Output.swift Sources/Runtime.swift Sources/ICC.swift Sources/Brightness.swift Tests/BrightnessTests.swift -o build/brightness-tests
+build/brightness-tests
