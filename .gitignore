@@ -1,0 +1,26 @@
+# Public repository allowlist. Keep machine-specific artifacts private by default.
+/*
+!/.gitignore
+!/README.md
+!/build.sh
+!/Sources/
+!/Tests/
+
+/Sources/*
+!/Sources/*.swift
+/Tests/*
+!/Tests/*.swift
+
+# Never publish diagnostics, profiles, local state, secrets or build products.
+**/.DS_Store
+**/.env*
+**/*.icc
+**/*.icm
+**/*.log
+**/*.app/
+**/*.dSYM/
+**/*baseline*
+**/*diagnostic*
+**/*transaction*
+**/*.key
+**/*.pem
