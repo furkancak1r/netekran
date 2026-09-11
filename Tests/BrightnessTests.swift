@@ -24,6 +24,25 @@ import AppKit
         func checked(_ bytes: [UInt8]) -> [UInt8] { bytes + [bytes.reduce(UInt8(0x50), ^)] }
         let reading = try decodeBrightness(checked(reply))
         precondition(reading.current == 150 && reading.maximum == 300 && reading.percent == 50)
+        let validReply = checked(reply)
+        var reads = 0, sends = 0
+        let retried = try readDDCBrightness(send: { sends += 1; return -1 }, receive: {
+            reads += 1
+            return (0, reads == 1 ? [UInt8](repeating: 0, count: 11) : validReply)
+        }, pause: {})
+        precondition(retried == reading && sends == 2 && reads == 2)
+        reads = 0
+        precondition((try? readDDCBrightness(send: { 0 }, receive: { reads += 1; return (-1, validReply) }, pause: {})) == nil)
+        precondition(reads == 3)
+        reads = 0
+        precondition((try? readDDCBrightness(send: { -1 }, receive: { reads += 1; return (0, [UInt8](repeating: 32, count: 11)) }, pause: {})) == nil)
+        precondition(reads == 3)
+        for value in [-1.0, 0, 14.9, 101, .nan, .infinity] {
+            precondition((try? dimmingOpacity(percent: value)) == nil)
+        }
+        let full = try dimmingOpacity(percent: 100), minimum = try dimmingOpacity(percent: 15)
+        precondition(full == 0 && abs(minimum - 0.85) < 0.00001)
+        print("PASS DDC retry: validated replies only, bounded failures and send-error recovery; dimming never fully blacks out")
         let scaled = try brightnessValue(percent: 50, maximum: 300)
         precondition(scaled == 150)
         for value in [-1.0, 101, .nan, .infinity] { precondition((try? brightnessValue(percent: value, maximum: 100)) == nil) }

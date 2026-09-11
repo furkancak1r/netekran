@@ -2,6 +2,56 @@ import AppKit
 import CoreGraphics
 import IOKit
 
+func dimmingOpacity(percent: Double) throws -> Double {
+    guard percent.isFinite, (15...100).contains(percent) else { throw NetError("Yazılımsal parlaklık %15–100 arasında olmalı.") }
+    return 1 - percent / 100
+}
+
+final class MonitorDimmer: NSObject {
+    // ponytail: dimming lasts only while this window exists; persistence can later store the percentage by display UUID.
+    private var window: NSPanel?
+    private var displayIdentity: String?
+    private(set) var percent: Double = 100
+
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(reposition), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    }
+    func screen() throws -> NSScreen {
+        let id = try targetDisplay()
+        guard CGDisplayIsAsleep(id) == 0, let uuid = identity(id),
+              displayIdentity == nil || displayIdentity == uuid,
+              let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id }) else {
+            throw NetError("Harici ekran bağlı veya uyanık değil.")
+        }
+        return screen
+    }
+    func apply(_ value: Double) throws {
+        let opacity = try dimmingOpacity(percent: value)
+        if value == 100 { window?.orderOut(nil); percent = 100; return }
+        let screen = try screen()
+        if window == nil {
+            let id = try targetDisplay(); displayIdentity = identity(id)
+            let panel = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            panel.title = "NetEkran monitör karartma"
+            panel.isReleasedWhenClosed = false; panel.backgroundColor = .black
+            panel.isOpaque = false; panel.hasShadow = false
+            panel.ignoresMouseEvents = true; panel.hidesOnDeactivate = false
+            panel.level = .screenSaver
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+            window = panel
+        }
+        window?.setFrame(screen.frame, display: true)
+        window?.alphaValue = opacity; window?.orderFrontRegardless(); percent = value
+    }
+    @objc private func reposition() {
+        guard window != nil else { return }
+        do { _ = try screen(); try apply(percent) }
+        catch { window?.orderOut(nil) }
+    }
+    deinit { NotificationCenter.default.removeObserver(self); window?.close() }
+}
+
 final class BrightnessControl: NSObject {
     let builtIn: Bool
     let canChange: () -> Bool
@@ -16,7 +66,10 @@ final class BrightnessControl: NSObject {
     private var slider: NSSlider?
     private var label: NSTextField?
     private var automaticItem: NSMenuItem?
-    private var title: String { builtIn ? "Mac ekranı" : "Harici monitör" }
+    private lazy var dimmer = MonitorDimmer()
+    private var software = false
+    private var ddcFailure: String?
+    private var title: String { builtIn ? "Mac ekranı" : software ? "Harici monitör (yazılımsal)" : "Harici monitör" }
 
     init(builtIn: Bool, canChange: @escaping () -> Bool) {
         self.builtIn = builtIn; self.canChange = canChange
@@ -40,11 +93,13 @@ final class BrightnessControl: NSObject {
     }
     private func update() {
         let value = desired ?? reading?.percent
-        slider?.isEnabled = canChange() && reading != nil && automaticDesired == nil
+        slider?.isEnabled = canChange() && reading != nil && automaticDesired == nil && !(software && busy)
+        slider?.minValue = software ? 15 : 0
         if let value { slider?.doubleValue = value }
         let status = failure ?? value.map { "%\(Int($0.rounded()))" } ?? "Parlaklık okunuyor…"
         label?.stringValue = title + ": " + status
-        label?.toolTip = label?.stringValue
+        label?.toolTip = software ? "DDC/CI kullanılamıyor. Görüntü yazılımsal karartılır; fiziksel arka ışık değişmez. Donanımı yeniden denemek için %100'e getirip menüyü yeniden açın.\n" + (ddcFailure ?? "") : label?.stringValue
+        slider?.setAccessibilityLabel(title + " parlaklığı")
         slider?.setAccessibilityValueDescription(value.map { "%\(Int($0.rounded()))" } ?? "Okunamadı")
         automaticItem?.isEnabled = canChange() && !busy && desired == nil && reading?.automatic != nil
         automaticItem?.state = reading?.automatic.map { $0 ? .on : .off } ?? .mixed
@@ -53,6 +108,7 @@ final class BrightnessControl: NSObject {
     @objc private func change(_ sender: NSSlider) {
         guard canChange(), reading != nil, automaticDesired == nil else { return }
         desired = sender.doubleValue; generation += 1; failure = nil; update()
+        if software { refresh(); return }
         debounce?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.refresh() }; debounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
@@ -63,6 +119,14 @@ final class BrightnessControl: NSObject {
     }
     func refresh() {
         guard !busy, canChange() else { update(); return }
+        if software && (desired != nil || dimmer.percent < 100) {
+            do {
+                _ = try dimmer.screen()
+                try dimmer.apply(desired ?? dimmer.percent)
+                reading = BrightnessReading(current: Int(dimmer.percent.rounded()), maximum: 100); failure = nil
+            } catch { reading = nil; failure = error.localizedDescription }
+            desired = nil; update(); return
+        }
         let percent = desired, automatic = automaticDesired, generation = generation
         busy = true; update()
         queue.async {
@@ -70,8 +134,13 @@ final class BrightnessControl: NSObject {
             DispatchQueue.main.async {
                 self.busy = false
                 switch result {
-                case .success(let reading): self.reading = reading; self.failure = nil
-                case .failure(let error): self.reading = nil; self.failure = error.localizedDescription
+                case .success(let reading): self.reading = reading; self.failure = nil; self.software = false
+                case .failure(let error):
+                    if !self.builtIn, percent == nil, (try? self.dimmer.screen()) != nil {
+                        self.software = true; self.ddcFailure = error.localizedDescription
+                        self.reading = BrightnessReading(current: Int(self.dimmer.percent.rounded()), maximum: 100)
+                        self.failure = nil; self.desired = nil
+                    } else { self.reading = nil; self.failure = error.localizedDescription }
                 }
                 if self.generation == generation { self.desired = nil; self.automaticDesired = nil }
                 self.update()
@@ -171,6 +240,21 @@ func decodeBrightness(_ bytes: [UInt8]) throws -> BrightnessReading {
     return BrightnessReading(current: current, maximum: maximum)
 }
 
+func readDDCBrightness(send: () -> Int32, receive: () -> (Int32, [UInt8]), pause: () -> Void = { Thread.sleep(forTimeInterval: 0.05) }) throws -> BrightnessReading {
+    var status: Int32 = 0
+    for _ in 0..<3 {
+        pause()
+        status = send()
+        pause()
+        let (readStatus, bytes) = receive()
+        // Some bridges report a send error but still deliver the reply. Only a complete validated reply counts.
+        if readStatus == 0, let reading = try? decodeBrightness(bytes) { return reading }
+        if readStatus != 0 { status = readStatus }
+    }
+    let reason = status == 0 ? "Yanıt doğrulanamadı." : "İletişim hatası \(String(format: "0x%08x", status))."
+    throw NetError("DDC/CI yanıtı alınamadı; monitör menüsünde DDC/CI'yi kontrol edin. " + reason)
+}
+
 func brightnessRequest(percent: Double?) throws -> BrightnessReading {
     if let percent { _ = try brightnessValue(percent: percent, maximum: 100) }
     let version = ProcessInfo.processInfo.operatingSystemVersion
@@ -222,12 +306,14 @@ func brightnessRequest(percent: Double?) throws -> BrightnessReading {
         guard result == 0 else { throw NetError("Monitör DDC isteğini kabul etmedi (\(result)).") }
     }
     func get() throws -> BrightnessReading {
-        try send(brightnessPacket())
-        Thread.sleep(forTimeInterval: 0.05)
-        var reply = [UInt8](repeating: 0, count: 11)
-        let result = reply.withUnsafeMutableBytes { read(service, 0x37, 0x51, $0.baseAddress!, UInt32($0.count)) }
-        guard result == 0 else { throw NetError("Monitör parlaklığı okunamadı (\(result)); DDC/CI açık olmalı.") }
-        return try decodeBrightness(reply)
+        try readDDCBrightness(send: {
+            var packet = brightnessPacket()
+            return packet.withUnsafeMutableBytes { write(service, 0x37, 0x51, $0.baseAddress!, UInt32($0.count)) }
+        }, receive: {
+            var reply = [UInt8](repeating: 0, count: 11)
+            let result = reply.withUnsafeMutableBytes { read(service, 0x37, 0x51, $0.baseAddress!, UInt32($0.count)) }
+            return (result, reply)
+        })
     }
     let before = try get()
     guard let percent else { return before }
