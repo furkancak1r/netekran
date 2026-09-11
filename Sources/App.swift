@@ -16,15 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pendingRemoval = false
     var protectionTimer: Timer?
     var debounce: DispatchWorkItem?
-    let brightnessQueue = DispatchQueue(label: "tr.netekran.brightness", qos: .userInitiated)
-    var brightness: BrightnessReading?
-    var brightnessError: String?
-    var brightnessBusy = false
-    var brightnessDesired: Double?
-    var brightnessGeneration = 0
-    var brightnessDebounce: DispatchWorkItem?
-    var brightnessSlider: NSSlider?
-    var brightnessLabel: NSTextField?
+    lazy var monitorBrightness = BrightnessControl(builtIn: false) { [weak self] in self?.transaction == nil }
+    lazy var macBrightness = BrightnessControl(builtIn: true) { [weak self] in self?.transaction == nil }
 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -58,60 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     func menuWillOpen(_ menu: NSMenu) {
         rebuild()
-        if transaction == nil { performBrightnessRequest() }
-    }
-    func addBrightnessControl() {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 330, height: 60))
-        let label = NSTextField(labelWithString: "")
-        label.frame = NSRect(x: 16, y: 34, width: 298, height: 20)
-        label.font = NSFont.systemFont(ofSize: 12)
-        label.lineBreakMode = .byTruncatingTail
-        let slider = NSSlider(value: brightnessDesired ?? brightness?.percent ?? 0, minValue: 0, maxValue: 100, target: self, action: #selector(changeBrightness(_:)))
-        slider.frame = NSRect(x: 16, y: 8, width: 298, height: 24)
-        slider.isContinuous = true
-        slider.setAccessibilityLabel("Harici monitör parlaklığı")
-        view.addSubview(label); view.addSubview(slider)
-        brightnessLabel = label; brightnessSlider = slider
-        updateBrightnessControl()
-        let item = NSMenuItem(); item.view = view; statusItem.menu?.addItem(item)
-    }
-    func updateBrightnessControl() {
-        let value = brightnessDesired ?? brightness?.percent
-        brightnessSlider?.isEnabled = brightness != nil && transaction == nil
-        if let value { brightnessSlider?.doubleValue = value }
-        let text: String
-        if let error = brightnessError { text = "Parlaklık: " + error }
-        else if let value { text = "Parlaklık: %\(Int(value.rounded()))" }
-        else { text = "Parlaklık okunuyor…" }
-        brightnessLabel?.stringValue = text
-        brightnessLabel?.toolTip = text
-        brightnessSlider?.setAccessibilityValueDescription(value.map { "%\(Int($0.rounded()))" } ?? "Okunamadı")
-    }
-    @objc func changeBrightness(_ slider: NSSlider) {
-        guard transaction == nil, brightness != nil else { return }
-        brightnessDesired = slider.doubleValue; brightnessGeneration += 1
-        brightnessError = nil; updateBrightnessControl()
-        brightnessDebounce?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.performBrightnessRequest() }
-        brightnessDebounce = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
-    }
-    func performBrightnessRequest() {
-        guard !brightnessBusy, transaction == nil else { return }
-        let desired = brightnessDesired, generation = brightnessGeneration
-        brightnessDesired = nil; brightnessBusy = true
-        brightnessQueue.async {
-            let result = Result { try runBrightnessRequest(percent: desired) }
-            DispatchQueue.main.async {
-                self.brightnessBusy = false
-                switch result {
-                case .success(let value): self.brightness = value; self.brightnessError = nil
-                case .failure(let error): self.brightness = nil; self.brightnessError = error.localizedDescription
-                }
-                if generation == self.brightnessGeneration { self.updateBrightnessControl() }
-                if self.brightnessDesired != nil { self.performBrightnessRequest() }
-            }
-        }
+        monitorBrightness.refresh()
+        macBrightness.refresh()
     }
     @discardableResult func add(_ title: String, _ action: Selector? = nil, enabled: Bool = true) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; item.isEnabled = enabled
@@ -134,7 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch { add(error.localizedDescription, enabled: false) }
         if !message.isEmpty { add(message, enabled: false) }
         statusItem.menu?.addItem(.separator())
-        addBrightnessControl()
+        monitorBrightness.add(to: statusItem.menu!)
+        macBrightness.add(to: statusItem.menu!)
         statusItem.menu?.addItem(.separator())
         add("Net görüntüyü uygula…", #selector(apply), enabled: transaction == nil)
         add("Tek HiDPI kaydını yeniden oluştur…", #selector(provision), enabled: transaction == nil)
@@ -306,6 +248,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static func main() {
         let args = CommandLine.arguments
         do {
+            if args == [args[0], "--builtin-brightness-read"] || (args.count == 3 && ["--builtin-brightness-set", "--builtin-auto-brightness"].contains(args[1])) {
+                var percent: Double?, automatic: Bool?
+                if args.count == 3 {
+                    if args[1] == "--builtin-auto-brightness" {
+                        guard ["on", "off"].contains(args[2]) else { throw NetError("Otomatik parlaklık için on/off seçin.") }
+                        automatic = args[2] == "on"
+                    } else {
+                        guard let value = Double(args[2]) else { throw NetError("Geçersiz parlaklık yüzdesi.") }
+                        percent = value
+                    }
+                }
+                print(String(data: try JSONEncoder().encode(builtInBrightnessRequest(percent: percent, automatic: automatic)), encoding: .utf8)!)
+                return
+            }
             if args == [args[0], "--brightness-read"] || (args.count == 3 && args[1] == "--brightness-set") {
                 var percent: Double?
                 if args.count == 3 {

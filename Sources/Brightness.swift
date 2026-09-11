@@ -1,10 +1,90 @@
-import Foundation
+import AppKit
 import CoreGraphics
 import IOKit
+
+final class BrightnessControl: NSObject {
+    let builtIn: Bool
+    let canChange: () -> Bool
+    private let queue = DispatchQueue(label: "tr.netekran.brightness", qos: .userInitiated)
+    private var reading: BrightnessReading?
+    private var failure: String?
+    private var busy = false
+    private var desired: Double?
+    private var automaticDesired: Bool?
+    private var generation = 0
+    private var debounce: DispatchWorkItem?
+    private var slider: NSSlider?
+    private var label: NSTextField?
+    private var automaticItem: NSMenuItem?
+    private var title: String { builtIn ? "Mac ekranı" : "Harici monitör" }
+
+    init(builtIn: Bool, canChange: @escaping () -> Bool) {
+        self.builtIn = builtIn; self.canChange = canChange
+    }
+    func add(to menu: NSMenu) {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 330, height: 60))
+        let label = NSTextField(labelWithString: "")
+        label.frame = NSRect(x: 16, y: 34, width: 298, height: 20)
+        label.font = NSFont.systemFont(ofSize: 12); label.lineBreakMode = .byTruncatingTail
+        let slider = NSSlider(value: 0, minValue: 0, maxValue: 100, target: self, action: #selector(change(_:)))
+        slider.frame = NSRect(x: 16, y: 8, width: 298, height: 24)
+        slider.isContinuous = true; slider.setAccessibilityLabel(title + " parlaklığı")
+        view.addSubview(label); view.addSubview(slider)
+        self.label = label; self.slider = slider
+        let item = NSMenuItem(); item.view = view; menu.addItem(item)
+        if builtIn {
+            let item = NSMenuItem(title: "Otomatik parlaklık (Mac ekranı)", action: #selector(toggleAutomatic), keyEquivalent: "")
+            item.target = self; menu.addItem(item); automaticItem = item
+        }
+        update()
+    }
+    private func update() {
+        let value = desired ?? reading?.percent
+        slider?.isEnabled = canChange() && reading != nil && automaticDesired == nil
+        if let value { slider?.doubleValue = value }
+        let status = failure ?? value.map { "%\(Int($0.rounded()))" } ?? "Parlaklık okunuyor…"
+        label?.stringValue = title + ": " + status
+        label?.toolTip = label?.stringValue
+        slider?.setAccessibilityValueDescription(value.map { "%\(Int($0.rounded()))" } ?? "Okunamadı")
+        automaticItem?.isEnabled = canChange() && !busy && desired == nil && reading?.automatic != nil
+        automaticItem?.state = reading?.automatic.map { $0 ? .on : .off } ?? .mixed
+        automaticItem?.toolTip = reading?.automatic == nil ? "Otomatik parlaklık desteklenmiyor veya okunamadı." : nil
+    }
+    @objc private func change(_ sender: NSSlider) {
+        guard canChange(), reading != nil, automaticDesired == nil else { return }
+        desired = sender.doubleValue; generation += 1; failure = nil; update()
+        debounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.refresh() }; debounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+    @objc private func toggleAutomatic() {
+        guard canChange(), !busy, desired == nil, let current = reading?.automatic else { return }
+        automaticDesired = !current; generation += 1; refresh()
+    }
+    func refresh() {
+        guard !busy, canChange() else { update(); return }
+        let percent = desired, automatic = automaticDesired, generation = generation
+        busy = true; update()
+        queue.async {
+            let result = Result { try runBrightnessRequest(percent: percent, builtIn: self.builtIn, automatic: automatic) }
+            DispatchQueue.main.async {
+                self.busy = false
+                switch result {
+                case .success(let reading): self.reading = reading; self.failure = nil
+                case .failure(let error): self.reading = nil; self.failure = error.localizedDescription
+                }
+                if self.generation == generation { self.desired = nil; self.automaticDesired = nil }
+                self.update()
+                if self.desired != nil || self.automaticDesired != nil { self.refresh() }
+            }
+        }
+    }
+}
 
 struct BrightnessReading: Codable, Equatable {
     let current: Int
     let maximum: Int
+    var automatic: Bool? = nil
     var percent: Double { Double(current) * 100 / Double(maximum) }
 }
 
@@ -13,6 +93,64 @@ func brightnessValue(percent: Double, maximum: Int) throws -> Int {
         throw NetError("Parlaklık 0–100 arasında olmalı.")
     }
     return Int((percent * Double(maximum) / 100).rounded())
+}
+
+func builtInBrightnessRequest(percent: Double? = nil, automatic: Bool? = nil) throws -> BrightnessReading {
+    if let percent { _ = try brightnessValue(percent: percent, maximum: 100) }
+    guard percent == nil || automatic == nil else { throw NetError("Tek parlaklık ayarı seçin.") }
+    var ids = [CGDirectDisplayID](repeating: 0, count: 32), count: UInt32 = 0
+    guard CGGetOnlineDisplayList(32, &ids, &count) == .success else { throw NetError("Mac ekranı bulunamadı.") }
+    let builtIn = ids.prefix(Int(count)).filter { CGDisplayIsBuiltin($0) != 0 }
+    guard builtIn.count == 1, let id = builtIn.first, CGDisplayIsAsleep(id) == 0 else {
+        throw NetError("Yerleşik ekran kapalı veya bağlı değil.")
+    }
+    guard let library = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_LAZY) else {
+        throw NetError("macOS parlaklık kontrolü kullanılamıyor.")
+    }
+    defer { dlclose(library) }
+    typealias Get = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
+    typealias Set = @convention(c) (CGDirectDisplayID, Float) -> Int32
+    typealias Has = @convention(c) (CGDirectDisplayID) -> Bool
+    typealias GetAuto = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Bool>) -> Int32
+    typealias SetAuto = @convention(c) (CGDirectDisplayID, Bool) -> Int32
+    guard let getSymbol = dlsym(library, "DisplayServicesGetBrightness"),
+          let setSymbol = dlsym(library, "DisplayServicesSetBrightness") else {
+        throw NetError("macOS parlaklık kontrolü desteklenmiyor.")
+    }
+    let get = unsafeBitCast(getSymbol, to: Get.self), set = unsafeBitCast(setSymbol, to: Set.self)
+    func readAuto() -> Bool? {
+        guard let hasSymbol = dlsym(library, "DisplayServicesHasAmbientLightCompensation"),
+              unsafeBitCast(hasSymbol, to: Has.self)(id),
+              let symbol = dlsym(library, "DisplayServicesAmbientLightCompensationEnabled") else { return nil }
+        var value = false
+        return unsafeBitCast(symbol, to: GetAuto.self)(id, &value) == 0 ? value : nil
+    }
+    func read() throws -> BrightnessReading {
+        var value: Float = .nan
+        guard get(id, &value) == 0, value.isFinite, (0...1).contains(value) else {
+            throw NetError("Mac ekranının parlaklığı okunamadı.")
+        }
+        return BrightnessReading(current: Int((Double(value) * 10000).rounded()), maximum: 10000, automatic: readAuto())
+    }
+    let before = try read()
+    if let automatic {
+        guard before.automatic != nil, let symbol = dlsym(library, "DisplayServicesEnableAmbientLightCompensation") else {
+            throw NetError("Otomatik parlaklık desteklenmiyor veya okunamadı.")
+        }
+        guard unsafeBitCast(symbol, to: SetAuto.self)(id, automatic) == 0 else {
+            throw NetError("Otomatik parlaklık değiştirilemedi.")
+        }
+    } else if let percent {
+        guard set(id, Float(percent / 100)) == 0 else { throw NetError("Mac ekranının parlaklığı değiştirilemedi.") }
+    } else { return before }
+    // ponytail: short readback polling handles the system's asynchronous update; the parent bounds the whole request.
+    for _ in 0..<10 {
+        Thread.sleep(forTimeInterval: 0.05)
+        let after = try read()
+        if let automatic, after.automatic == automatic { return after }
+        if let percent, abs(after.percent - percent) <= 1 { return after }
+    }
+    throw NetError("macOS parlaklık değişimini doğrulamadı; menüyü yeniden açın.")
 }
 
 func brightnessPacket(value: Int? = nil) -> [UInt8] {
@@ -102,10 +240,14 @@ func brightnessRequest(percent: Double?) throws -> BrightnessReading {
     return after
 }
 
-func runBrightnessRequest(percent: Double?) throws -> BrightnessReading {
+func runBrightnessRequest(percent: Double?, builtIn: Bool = false, automatic: Bool? = nil) throws -> BrightnessReading {
+    if let percent { _ = try brightnessValue(percent: percent, maximum: 100) }
+    guard automatic == nil || (builtIn && percent == nil) else { throw NetError("Geçersiz otomatik parlaklık isteği.") }
     let process = Process(), output = Pipe(), errors = Pipe()
     process.executableURL = Bundle.main.executableURL
-    process.arguments = percent.map { ["--brightness-set", String($0)] } ?? ["--brightness-read"]
+    let prefix = builtIn ? "--builtin-brightness" : "--brightness"
+    process.arguments = automatic.map { ["--builtin-auto-brightness", $0 ? "on" : "off"] }
+        ?? percent.map { [prefix + "-set", String($0)] } ?? [prefix + "-read"]
     process.standardOutput = output; process.standardError = errors
     try process.run()
     guard waitForWorker(process, timeout: 3) else {
